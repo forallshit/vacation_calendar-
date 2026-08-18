@@ -226,23 +226,48 @@ async def process_birth_date(message: Message, state: FSMContext):
 
     today = date.today()
     schedule = vaccines.get_vaccines_for_child(birth_date, today)
-    schedule.sort(key=lambda v: v["days_left"])
-    next_vaccine = schedule[0]
-    icon, status = vaccine_status(next_vaccine)
 
-    text = (
-        f"👶 Привет, {name}!\n"
-        f"Тебе сегодня: {format_age(birth_date, today)}.\n\n"
-        f"💉 Ближайшая прививка: <b>{next_vaccine['name']}</b>\n"
-        f"{icon} {status}"
-    )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="✅ Поставили",
-            callback_data=f"markdone:{child_id}:{next_vaccine['id']}",
-        )],
-        [InlineKeyboardButton(text="📋 Посмотреть следующие", callback_data=f"next6:{child_id}")],
-    ])
+    overdue = [v for v in schedule if v["days_left"] < 0]
+    overdue.sort(key=lambda v: v["days_left"])
+    upcoming = [v for v in schedule if v["days_left"] >= 0]
+    upcoming.sort(key=lambda v: v["days_left"])
+
+    age_line = f"👶 Привет, {name}!\nТебе сегодня: {format_age(birth_date, today)}.\n\n"
+
+    if overdue:
+        # ребёнку больше нескольких дней — по графику уже должны быть прививки,
+        # которые могли быть поставлены раньше (например, ещё в роддоме)
+        shown = overdue[:10]
+        lines = [age_line + "По национальному календарю у тебя уже должны быть поставлены такие прививки:"]
+        for v in shown:
+            lines.append(f"• {v['name']}")
+        if len(overdue) > len(shown):
+            lines.append(f"...и ещё {len(overdue) - len(shown)}")
+        lines.append("\nВы с мамой их уже поставили?")
+        text = "\n".join(lines)
+
+        buttons = [
+            [InlineKeyboardButton(text=f"✅ {v['name']}", callback_data=f"markdone:{child_id}:{v['id']}")]
+            for v in shown
+        ]
+        buttons.append([InlineKeyboardButton(text="📋 Предстоящие прививки", callback_data=f"next6:{child_id}")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    else:
+        next_vaccine = upcoming[0]
+        icon, status = vaccine_status(next_vaccine)
+        text = (
+            age_line +
+            f"💉 Ближайшая прививка: <b>{next_vaccine['name']}</b>\n"
+            f"{icon} {status}"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✅ Поставили",
+                callback_data=f"markdone:{child_id}:{next_vaccine['id']}",
+            )],
+            [InlineKeyboardButton(text="📋 Посмотреть следующие", callback_data=f"next6:{child_id}")],
+        ])
+
     await message.answer(text, reply_markup=keyboard)
 
 
@@ -257,6 +282,7 @@ def build_children_keyboard(children):
 
 # ==== Список детей — тап открывает меню ребёнка ====
 @router.message(Command("children"))
+@router.message(Command("kids"))
 @router.message(F.text == "👶 Мои дети")
 async def cmd_children(message: Message):
     children = database.get_children(message.from_user.id)
@@ -286,23 +312,62 @@ async def on_back_children(callback: CallbackQuery):
     await callback.answer()
 
 
-# ==== Меню ребёнка: предстоящие / поставленные ====
+# ==== Карточка ребёнка: поставленные + ближайшие 3 предстоящие ====
 @router.callback_query(F.data.startswith("childmenu:"))
 async def on_child_menu(callback: CallbackQuery):
     child_id = int(callback.data.split(":")[1])
     children = database.get_children(callback.from_user.id)
-    name = next((n for cid, n, _ in children if cid == child_id), None)
+    match = next(((n, b) for cid, n, b in children if cid == child_id), None)
 
-    if name is None:
+    if match is None:
         await callback.answer("Не нашёл такого ребёнка", show_alert=True)
         return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💉 Предстоящие прививки", callback_data=f"upcoming:{child_id}")],
-        [InlineKeyboardButton(text="✅ Поставленные", callback_data=f"donelist:{child_id}")],
-        [InlineKeyboardButton(text="⬅️ К списку детей", callback_data="backchildren")],
-    ])
-    await callback.message.edit_text(f"👶 <b>{name}</b>\nЧто посмотреть?", reply_markup=keyboard)
+    name, birth_date_str = match
+    birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
+    today = date.today()
+
+    schedule = vaccines.get_vaccines_for_child(birth_date, today)
+    completed_ids = database.get_completed_vaccine_ids(child_id)
+    completed = database.get_completed_vaccines_with_dates(child_id)
+
+    upcoming = [v for v in schedule if v["id"] not in completed_ids]
+    upcoming.sort(key=lambda v: v["days_left"])
+    next3 = upcoming[:3]
+
+    lines = [f"👶 <b>{name}</b>\nВозраст: {format_age(birth_date, today)}\n"]
+
+    if completed:
+        lines.append("✅ <b>Поставленные прививки:</b>")
+        for vaccine_id, completed_date in completed:
+            vaccine_name = vaccines.get_vaccine_name_by_id(vaccine_id)
+            date_formatted = datetime.strptime(completed_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+            lines.append(f"• {vaccine_name} — {date_formatted}")
+    else:
+        lines.append("✅ Пока нет отмеченных прививок.")
+
+    lines.append("")
+
+    if next3:
+        lines.append("💉 <b>Ближайшие предстоящие:</b>")
+        for v in next3:
+            icon, status = vaccine_status(v)
+            lines.append(f"{icon} {v['name']} — {status}")
+    else:
+        lines.append("💉 Все прививки по графику уже поставлены. 🎉")
+
+    text = "\n".join(lines)
+
+    buttons = [
+        [InlineKeyboardButton(text=v["name"], callback_data=f"vaccinedetail:{v['id']}:{child_id}")]
+        for v in next3
+    ]
+    if len(upcoming) > len(next3):
+        buttons.append([InlineKeyboardButton(text="📋 Все предстоящие", callback_data=f"upcoming:{child_id}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ К списку детей", callback_data="backchildren")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
 
