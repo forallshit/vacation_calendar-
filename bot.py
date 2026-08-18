@@ -79,10 +79,16 @@ async def cmd_start(message: Message):
         InlineKeyboardButton(text="➕ Добавить ребёнка", callback_data="start_add_child")
     ]])
 
-    try:
-        photo = FSInputFile(CALENDAR_IMAGE_PATH)
-        await message.answer_photo(photo=photo, caption=caption, reply_markup=add_button)
-    except FileNotFoundError:
+    photo_sent = False
+    if os.path.isfile(CALENDAR_IMAGE_PATH):
+        try:
+            photo = FSInputFile(CALENDAR_IMAGE_PATH)
+            await message.answer_photo(photo=photo, caption=caption, reply_markup=add_button)
+            photo_sent = True
+        except Exception as e:
+            logging.warning(f"Не удалось отправить картинку календаря: {e}")
+
+    if not photo_sent:
         # на случай, если картинка почему-то не попала в деплой — бот не должен падать
         await message.answer(caption, reply_markup=add_button)
 
