@@ -86,6 +86,63 @@ def vaccine_status(v) -> tuple:
     else:
         return "⚪️", f"через {v['days_left']} дн. ({v['due_date'].strftime('%d.%m.%Y')})"
 
+
+def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
+    """Собирает текст+клавиатуру карточки 'уже должны быть поставлены' — пересчитывается
+    заново при каждой отметке, чтобы уже отмеченные прививки пропадали из списка, а
+    остальные оставались на месте. Когда просроченных не осталось — карточка становится
+    поздравительной с информацией о следующей предстоящей прививке."""
+    today = date.today()
+    schedule = vaccines.get_vaccines_for_child(birth_date, today)
+    completed_ids = database.get_completed_vaccine_ids(child_id)
+
+    overdue = [v for v in schedule if v["days_left"] < 0 and v["id"] not in completed_ids]
+    overdue.sort(key=lambda v: v["days_left"])
+
+    if overdue:
+        shown = overdue[:10]
+        lines = [
+            f"👶 Привет, {name}!\nТебе сегодня: {format_age(birth_date, today)}.\n",
+            "По национальному календарю у тебя уже должны быть поставлены такие прививки:",
+        ]
+        for v in shown:
+            lines.append(f"• {v['name']}")
+        if len(overdue) > len(shown):
+            lines.append(f"...и ещё {len(overdue) - len(shown)}")
+        lines.append("\nВы с мамой их уже поставили? Отмечай по одной ✅")
+        text = "\n".join(lines)
+
+        buttons = [
+            [InlineKeyboardButton(text=f"✅ {v['name']}", callback_data=f"overduedone:{child_id}:{v['id']}")]
+            for v in shown
+        ]
+        buttons.append([InlineKeyboardButton(text="📋 Предстоящие прививки", callback_data=f"next6:{child_id}")])
+        return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    # просроченных не осталось — поздравляем и показываем следующую предстоящую
+    upcoming = [v for v in schedule if v["id"] not in completed_ids]
+    upcoming.sort(key=lambda v: v["days_left"])
+
+    if upcoming:
+        nxt = upcoming[0]
+        icon, status = vaccine_status(nxt)
+        text = (
+            f"🎉 Отлично! У {name} стоят все нужные прививки по возрасту.\n\n"
+            f"Следующая: <b>{nxt['name']}</b> — {icon} {status}\n"
+            f"Я напомню о ней заранее, за неделю."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="ℹ️ Подробнее об этой прививке", callback_data=f"vaccinedetail:{nxt['id']}:{child_id}")],
+            [InlineKeyboardButton(text="Спасибо! ❣️", callback_data="thanks_ack")],
+        ])
+    else:
+        text = f"🎉 Отлично! У {name} поставлены вообще все прививки по национальному календарю."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Спасибо! ❣️", callback_data="thanks_ack")
+        ]])
+
+    return text, keyboard
+
 # ==== НАСТРОЙКИ ====
 # Вставь сюда токен, который дал @BotFather, ИЛИ задай переменную окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН")
@@ -157,9 +214,59 @@ async def cmd_help(message: Message):
         "поставленные прививки. У каждой прививки — описание, от чего она и "
         "почему важна.\n"
         "➕ Добавить ребёнка\n"
-        "✅ Отметить прививку сделанной (чтобы не напоминал зря)",
+        "✅ Отметить прививку сделанной (чтобы не напоминал зря)\n"
+        "/list — весь национальный календарь прививок справочником",
         reply_markup=main_menu,
     )
+
+
+# ==== Справочник: весь национальный календарь прививок (не привязан к ребёнку) ====
+def build_vaccine_list_keyboard():
+    buttons = [
+        [InlineKeyboardButton(text=v["name"], callback_data=f"scheduleinfo:{v['id']}")]
+        for v in vaccines.get_all_vaccines()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.message(Command("list"))
+async def cmd_list_all(message: Message):
+    await message.answer(
+        "💉 Полный национальный календарь прививок.\nВыбери прививку, чтобы узнать, "
+        "на каком сроке она ставится, от чего защищает и почему важна:",
+        reply_markup=build_vaccine_list_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("scheduleinfo:"))
+async def on_schedule_info(callback: CallbackQuery):
+    vaccine_id = callback.data.split(":", 1)[1]
+    vaccine = vaccines.get_vaccine_by_id(vaccine_id)
+
+    if vaccine is None:
+        await callback.answer("Не нашёл информацию об этой прививке", show_alert=True)
+        return
+
+    text = (
+        f"💉 <b>{vaccine['name']}</b>\n"
+        f"📅 Когда ставится: {vaccine.get('age_label', '—')}\n\n"
+        f"{vaccine['info']}"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⬅️ Ко всему календарю", callback_data="list_all_back")
+    ]])
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "list_all_back")
+async def on_list_all_back(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "💉 Полный национальный календарь прививок.\nВыбери прививку, чтобы узнать, "
+        "на каком сроке она ставится, от чего защищает и почему важна:",
+        reply_markup=build_vaccine_list_keyboard(),
+    )
+    await callback.answer()
 
 
 # ==== Добавление ребёнка: шаг 1 — имя ====
@@ -226,37 +333,19 @@ async def process_birth_date(message: Message, state: FSMContext):
 
     today = date.today()
     schedule = vaccines.get_vaccines_for_child(birth_date, today)
+    has_overdue = any(v["days_left"] < 0 for v in schedule)
 
-    overdue = [v for v in schedule if v["days_left"] < 0]
-    overdue.sort(key=lambda v: v["days_left"])
-    upcoming = [v for v in schedule if v["days_left"] >= 0]
-    upcoming.sort(key=lambda v: v["days_left"])
-
-    age_line = f"👶 Привет, {name}!\nТебе сегодня: {format_age(birth_date, today)}.\n\n"
-
-    if overdue:
+    if has_overdue:
         # ребёнку больше нескольких дней — по графику уже должны быть прививки,
         # которые могли быть поставлены раньше (например, ещё в роддоме)
-        shown = overdue[:10]
-        lines = [age_line + "По национальному календарю у тебя уже должны быть поставлены такие прививки:"]
-        for v in shown:
-            lines.append(f"• {v['name']}")
-        if len(overdue) > len(shown):
-            lines.append(f"...и ещё {len(overdue) - len(shown)}")
-        lines.append("\nВы с мамой их уже поставили?")
-        text = "\n".join(lines)
-
-        buttons = [
-            [InlineKeyboardButton(text=f"✅ {v['name']}", callback_data=f"markdone:{child_id}:{v['id']}")]
-            for v in shown
-        ]
-        buttons.append([InlineKeyboardButton(text="📋 Предстоящие прививки", callback_data=f"next6:{child_id}")])
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        text, keyboard = build_overdue_card(child_id, name, birth_date)
     else:
+        upcoming = [v for v in schedule if v["days_left"] >= 0]
+        upcoming.sort(key=lambda v: v["days_left"])
         next_vaccine = upcoming[0]
         icon, status = vaccine_status(next_vaccine)
         text = (
-            age_line +
+            f"👶 Привет, {name}!\nТебе сегодня: {format_age(birth_date, today)}.\n\n"
             f"💉 Ближайшая прививка: <b>{next_vaccine['name']}</b>\n"
             f"{icon} {status}"
         )
@@ -577,6 +666,40 @@ async def on_mark_done(callback: CallbackQuery):
     ]])
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer("Готово!")
+
+
+# ==== Отметить одну прививку из списка "уже должны быть поставлены" ====
+# В отличие от markdone — не заменяет карточку целиком, а пересчитывает список:
+# отмеченная прививка пропадает, остальные кнопки остаются на месте.
+@router.callback_query(F.data.startswith("overduedone:"))
+async def on_overdue_done(callback: CallbackQuery):
+    _, child_id_str, vaccine_id = callback.data.split(":")
+    child_id = int(child_id_str)
+
+    database.mark_vaccine_done(
+        child_id=child_id,
+        vaccine_id=vaccine_id,
+        completed_date=date.today().isoformat(),
+    )
+
+    children = database.get_children(callback.from_user.id)
+    match = next(((n, b) for cid, n, b in children if cid == child_id), None)
+
+    if match is None:
+        await callback.answer("Не нашёл такого ребёнка", show_alert=True)
+        return
+
+    name, birth_date_str = match
+    birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
+
+    text, keyboard = build_overdue_card(child_id, name, birth_date)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer("Отмечено ✅")
+
+
+@router.callback_query(F.data == "thanks_ack")
+async def on_thanks_ack(callback: CallbackQuery):
+    await callback.answer("Пожалуйста! 🍀")
 
 
 async def main():
