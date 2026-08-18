@@ -30,6 +30,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
+    FSInputFile,
 )
 
 import database
@@ -39,6 +40,10 @@ from scheduler import setup_scheduler
 # ==== НАСТРОЙКИ ====
 # Вставь сюда токен, который дал @BotFather, ИЛИ задай переменную окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН")
+
+# Картинка с инфографикой календаря прививок, которая приходит по /start
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+CALENDAR_IMAGE_PATH = os.path.join(ASSETS_DIR, "vaccine_calendar.png")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -64,14 +69,28 @@ class AddChild(StatesGroup):
 # ==== Команда /start ====
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    text = (
-        "Привет! Я помогу не пропустить прививки твоего ребёнка по "
+    caption = (
+        "Этот бот поможет вам не пропустить обязательные прививки по "
         "национальному календарю РФ.\n\n"
-        "👶 Мои дети — выбери ребёнка и посмотри его прививки\n"
-        "➕ Добавить ребёнка\n"
-        "✅ Отметить прививку сделанной"
+        "Добавь ребёнка — и бот покажет, какие прививки пора ставить, а какие "
+        "ещё предстоят, и сам напомнит заранее, когда придёт время."
     )
-    await message.answer(text, reply_markup=main_menu)
+    add_button = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="➕ Добавить ребёнка", callback_data="start_add_child")
+    ]])
+
+    try:
+        photo = FSInputFile(CALENDAR_IMAGE_PATH)
+        await message.answer_photo(photo=photo, caption=caption, reply_markup=add_button)
+    except FileNotFoundError:
+        # на случай, если картинка почему-то не попала в деплой — бот не должен падать
+        await message.answer(caption, reply_markup=add_button)
+
+    await message.answer(
+        "Кнопки ниже всегда под рукой — чтобы посмотреть детей, добавить "
+        "нового или отметить прививку сделанной:",
+        reply_markup=main_menu,
+    )
 
 
 @router.message(Command("help"))
@@ -89,13 +108,23 @@ async def cmd_help(message: Message):
 
 
 # ==== Добавление ребёнка: шаг 1 — имя ====
+async def ask_child_name(send_func, state: FSMContext):
+    """Общий код для запроса имени ребёнка — используется и из команды/кнопки
+    меню, и из кнопки под приветственной картинкой."""
+    await send_func("Как зовут малыша?", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(AddChild.waiting_for_name)
+
+
 @router.message(Command("add"))
 @router.message(F.text == "➕ Добавить ребёнка")
 async def cmd_add(message: Message, state: FSMContext):
-    await message.answer(
-        "Как зовут малыша?", reply_markup=ReplyKeyboardRemove()
-    )
-    await state.set_state(AddChild.waiting_for_name)
+    await ask_child_name(message.answer, state)
+
+
+@router.callback_query(F.data == "start_add_child")
+async def on_start_add_child(callback: CallbackQuery, state: FSMContext):
+    await ask_child_name(callback.message.answer, state)
+    await callback.answer()
 
 
 @router.message(AddChild.waiting_for_name)
