@@ -37,6 +37,55 @@ import database
 import vaccines
 from scheduler import setup_scheduler
 
+
+# ==== Вспомогательные функции для текста (возраст, статус прививки) ====
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    n_abs = abs(n) % 100
+    n1 = n_abs % 10
+    if 10 < n_abs < 20:
+        return many
+    if n1 == 1:
+        return one
+    if 2 <= n1 <= 4:
+        return few
+    return many
+
+
+def format_age(birth_date, today) -> str:
+    """Возвращает возраст ребёнка человеческим текстом: '3 месяца', '1 год 2 месяца' и т.д."""
+    days = (today - birth_date).days
+
+    months = (today.year - birth_date.year) * 12 + (today.month - birth_date.month)
+    if today.day < birth_date.day:
+        months -= 1
+    months = max(months, 0)
+
+    years = months // 12
+    rem_months = months % 12
+
+    if years >= 1:
+        parts = [f"{years} " + _plural(years, "год", "года", "лет")]
+        if rem_months > 0:
+            parts.append(f"{rem_months} " + _plural(rem_months, "месяц", "месяца", "месяцев"))
+        return " ".join(parts)
+
+    if months == 0:
+        return f"{days} " + _plural(days, "день", "дня", "дней")
+
+    return f"{months} " + _plural(months, "месяц", "месяца", "месяцев")
+
+
+def vaccine_status(v) -> tuple:
+    """Возвращает (иконка, текст статуса) для прививки с учётом days_left."""
+    if v["days_left"] < 0:
+        return "⚪️", f"была {abs(v['days_left'])} дн. назад"
+    elif v["days_left"] == 0:
+        return "🔴", "СЕГОДНЯ"
+    elif v["days_left"] <= 7:
+        return "🟡", f"через {v['days_left']} дн. ({v['due_date'].strftime('%d.%m.%Y')})"
+    else:
+        return "⚪️", f"через {v['days_left']} дн. ({v['due_date'].strftime('%d.%m.%Y')})"
+
 # ==== НАСТРОЙКИ ====
 # Вставь сюда токен, который дал @BotFather, ИЛИ задай переменную окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН")
@@ -167,13 +216,34 @@ async def process_birth_date(message: Message, state: FSMContext):
         name=name,
         birth_date=birth_date.isoformat(),
     )
+    child_id = None
+    # находим только что добавленного ребёнка (совпадение по имени и дате рождения)
+    for cid, n, b in database.get_children(message.from_user.id):
+        if n == name and b == birth_date.isoformat():
+            child_id = cid
+
     await state.clear()
 
-    await message.answer(
-        f"Готово! Добавил(а) {name}, дата рождения {raw}.\n"
-        f"Посмотреть прививки — кнопка «👶 Мои дети»",
-        reply_markup=main_menu,
+    today = date.today()
+    schedule = vaccines.get_vaccines_for_child(birth_date, today)
+    schedule.sort(key=lambda v: v["days_left"])
+    next_vaccine = schedule[0]
+    icon, status = vaccine_status(next_vaccine)
+
+    text = (
+        f"👶 Привет, {name}!\n"
+        f"Тебе сегодня: {format_age(birth_date, today)}.\n\n"
+        f"💉 Ближайшая прививка: <b>{next_vaccine['name']}</b>\n"
+        f"{icon} {status}"
     )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="✅ Поставили",
+            callback_data=f"markdone:{child_id}:{next_vaccine['id']}",
+        )],
+        [InlineKeyboardButton(text="📋 Посмотреть следующие", callback_data=f"next6:{child_id}")],
+    ])
+    await message.answer(text, reply_markup=keyboard)
 
 
 # ==== Вспомогательное: клавиатура со списком детей ====
@@ -267,14 +337,7 @@ async def on_upcoming(callback: CallbackQuery):
 
     buttons = []
     for v in not_done[:10]:
-        if v["days_left"] < 0:
-            icon = "⚪️"
-        elif v["days_left"] == 0:
-            icon = "🔴"
-        elif v["days_left"] <= 7:
-            icon = "🟡"
-        else:
-            icon = "⚪️"
+        icon, _ = vaccine_status(v)
         buttons.append([InlineKeyboardButton(
             text=f"{icon} {v['name']}",
             callback_data=f"vaccinedetail:{v['id']}:{child_id}",
@@ -285,6 +348,51 @@ async def on_upcoming(callback: CallbackQuery):
     await callback.message.edit_text(
         f"💉 <b>{name}</b> — предстоящие прививки:\nВыбери прививку, чтобы узнать подробности.",
         reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+# ==== Прививки на ближайшие полгода (после добавления ребёнка) ====
+@router.callback_query(F.data.startswith("next6:"))
+async def on_next6(callback: CallbackQuery):
+    child_id = int(callback.data.split(":")[1])
+    children = database.get_children(callback.from_user.id)
+    match = next(((n, b) for cid, n, b in children if cid == child_id), None)
+
+    if match is None:
+        await callback.answer("Не нашёл такого ребёнка", show_alert=True)
+        return
+
+    name, birth_date_str = match
+    birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
+    schedule = vaccines.get_vaccines_for_child(birth_date, date.today())
+    completed_ids = database.get_completed_vaccine_ids(child_id)
+
+    upcoming6 = [v for v in schedule if v["id"] not in completed_ids and v["days_left"] <= 183]
+    upcoming6.sort(key=lambda v: v["days_left"])
+
+    back_button = InlineKeyboardButton(text="⬅️ Назад", callback_data=f"childmenu:{child_id}")
+
+    if not upcoming6:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[back_button]])
+        await callback.message.edit_text(
+            f"У {name} нет прививок по графику в ближайшие полгода.", reply_markup=keyboard
+        )
+        await callback.answer()
+        return
+
+    buttons = []
+    for v in upcoming6:
+        icon, _ = vaccine_status(v)
+        buttons.append([InlineKeyboardButton(
+            text=f"{icon} {v['name']}",
+            callback_data=f"vaccinedetail:{v['id']}:{child_id}",
+        )])
+    buttons.append([back_button])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(
+        f"💉 <b>{name}</b> — прививки на ближайшие полгода:", reply_markup=keyboard
     )
     await callback.answer()
 
@@ -377,10 +485,32 @@ async def on_mark_done(callback: CallbackQuery):
     )
 
     vaccine_name = vaccines.get_vaccine_name_by_id(vaccine_id)
+
+    children = database.get_children(callback.from_user.id)
+    match = next(((n, b) for cid, n, b in children if cid == child_id), None)
+
+    next_line = ""
+    child_name = ""
+    if match:
+        child_name, birth_date_str = match
+        birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
+        schedule = vaccines.get_vaccines_for_child(birth_date, date.today())
+        completed_ids = database.get_completed_vaccine_ids(child_id)
+        not_done = [v for v in schedule if v["id"] not in completed_ids]
+
+        if not_done:
+            not_done.sort(key=lambda v: v["days_left"])
+            nxt = not_done[0]
+            _, status = vaccine_status(nxt)
+            next_line = f"\n\nСледующая прививка запланирована: <b>{nxt['name']}</b> — {status}"
+        else:
+            next_line = "\n\nБольше прививок по графику нет — все поставлены. 🎉"
+
+    text = f"✅ Отлично! Теперь {child_name} защищён(а) от: <b>{vaccine_name}</b>.{next_line}"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="⬅️ К прививкам ребёнка", callback_data=f"childmenu:{child_id}")
     ]])
-    await callback.message.edit_text(f"✅ Отмечено: {vaccine_name}", reply_markup=keyboard)
+    await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer("Готово!")
 
 
