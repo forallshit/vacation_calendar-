@@ -122,14 +122,14 @@ def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
     if overdue:
         shown = overdue[:10]
         lines = [
-            f"👶 Привет, {name}!\nТебе сегодня: {format_age(birth_date, today)}.\n",
-            "По национальному календарю у тебя уже должны быть поставлены такие прививки:",
+            f"👶 <b>{name}</b>\nВозраст: {format_age(birth_date, today)}.\n",
+            f"По национальному календарю у {name} уже должны быть поставлены такие прививки:",
         ]
         for v in shown:
             lines.append(f"• {v['name']}")
         if len(overdue) > len(shown):
             lines.append(f"...и ещё {len(overdue) - len(shown)}")
-        lines.append("\nВы с мамой их уже поставили? Отмечай по одной ✅")
+        lines.append("\nВы уже поставили их ребёнку? Отмечайте по одной ✅")
         text = "\n".join(lines)
 
         buttons = [
@@ -201,7 +201,7 @@ async def cmd_start(message: Message):
     caption = (
         "Этот бот поможет вам не пропустить обязательные прививки по "
         "национальному календарю РФ.\n\n"
-        "Добавь ребёнка — и бот покажет, какие прививки пора ставить, а какие "
+        "Добавьте ребёнка — и бот покажет, какие прививки пора ставить, а какие "
         "ещё предстоят, и сам напомнит заранее, когда придёт время."
     )
     add_button = InlineKeyboardMarkup(inline_keyboard=[[
@@ -231,9 +231,9 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
-        "Я слежу за графиком прививок по датам рождения детей, которых ты добавишь.\n"
+        "Я слежу за графиком прививок по датам рождения детей, которых вы добавите.\n"
         "Раз в день проверяю, у кого скоро прививка, и присылаю напоминание заранее.\n\n"
-        "👶 Мои дети — выбери ребёнка, дальше увидишь его предстоящие и уже "
+        "👶 Мои дети — выберите ребёнка, дальше увидите его предстоящие и уже "
         "поставленные прививки. У каждой прививки — описание, от чего она и "
         "почему важна.\n"
         "➕ Добавить ребёнка\n"
@@ -255,7 +255,7 @@ def build_vaccine_list_keyboard():
 @router.message(Command("list"))
 async def cmd_list_all(message: Message):
     await message.answer(
-        "💉 Полный национальный календарь прививок.\nВыбери прививку, чтобы узнать, "
+        "💉 Полный национальный календарь прививок.\nВыберите прививку, чтобы узнать, "
         "на каком сроке она ставится, от чего защищает и почему важна:",
         reply_markup=build_vaccine_list_keyboard(),
     )
@@ -285,7 +285,7 @@ async def on_schedule_info(callback: CallbackQuery):
 @router.callback_query(F.data == "list_all_back")
 async def on_list_all_back(callback: CallbackQuery):
     await callback.message.edit_text(
-        "💉 Полный национальный календарь прививок.\nВыбери прививку, чтобы узнать, "
+        "💉 Полный национальный календарь прививок.\nВыберите прививку, чтобы узнать, "
         "на каком сроке она ставится, от чего защищает и почему важна:",
         reply_markup=build_vaccine_list_keyboard(),
     )
@@ -329,13 +329,13 @@ async def process_birth_date(message: Message, state: FSMContext):
         birth_date = datetime.strptime(raw, "%d.%m.%Y").date()
     except ValueError:
         await message.answer(
-            "Не получилось распознать дату. Введи в формате ДД.ММ.ГГГГ, "
+            "Не получилось распознать дату. Введите в формате ДД.ММ.ГГГГ, "
             "например: 15.03.2024"
         )
         return
 
     if birth_date > date.today():
-        await message.answer("Дата рождения не может быть в будущем. Попробуй ещё раз.")
+        await message.answer("Дата рождения не может быть в будущем. Попробуйте ещё раз.")
         return
 
     data = await state.get_data()
@@ -401,12 +401,12 @@ async def cmd_children(message: Message):
 
     if not children:
         await message.answer(
-            "У тебя пока нет добавленных детей. Добавь через «➕ Добавить ребёнка»",
+            "У вас пока нет добавленных детей. Добавьте через «➕ Добавить ребёнка»",
             reply_markup=main_menu,
         )
         return
 
-    await message.answer("Выбери ребёнка:", reply_markup=build_children_keyboard(children))
+    await message.answer("Выберите ребёнка:", reply_markup=build_children_keyboard(children))
 
 
 @router.callback_query(F.data == "backchildren")
@@ -415,12 +415,12 @@ async def on_back_children(callback: CallbackQuery):
 
     if not children:
         await callback.message.edit_text(
-            "У тебя пока нет добавленных детей. Добавь через «➕ Добавить ребёнка»"
+            "У вас пока нет добавленных детей. Добавьте через «➕ Добавить ребёнка»"
         )
         await callback.answer()
         return
 
-    await callback.message.edit_text("Выбери ребёнка:", reply_markup=build_children_keyboard(children))
+    await callback.message.edit_text("Выберите ребёнка:", reply_markup=build_children_keyboard(children))
     await callback.answer()
 
 
@@ -523,7 +523,7 @@ async def on_upcoming(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(
-        f"💉 <b>{name}</b> — предстоящие прививки:\nВыбери прививку, чтобы узнать подробности.",
+        f"💉 <b>{name}</b> — предстоящие прививки:\nВыберите прививку, чтобы узнать подробности.",
         reply_markup=keyboard,
     )
     await callback.answer()
@@ -634,7 +634,7 @@ async def cmd_done(message: Message):
 
     if not children:
         await message.answer(
-            "У тебя пока нет добавленных детей. Добавь через «➕ Добавить ребёнка»",
+            "У вас пока нет добавленных детей. Добавьте через «➕ Добавить ребёнка»",
             reply_markup=main_menu,
         )
         return
