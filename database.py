@@ -85,6 +85,24 @@ def delete_child(child_id: int, telegram_user_id: int):
         conn.commit()
 
 
+def delete_all_children(telegram_user_id: int):
+    """Удаляет всех детей конкретного пользователя вместе с их отметками о прививках."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT id FROM children WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        )
+        child_ids = [row[0] for row in cursor.fetchall()]
+        if child_ids:
+            placeholders = ",".join("?" for _ in child_ids)
+            conn.execute(
+                f"DELETE FROM completed_vaccines WHERE child_id IN ({placeholders})",
+                child_ids,
+            )
+        conn.execute("DELETE FROM children WHERE telegram_user_id = ?", (telegram_user_id,))
+        conn.commit()
+
+
 def mark_vaccine_done(child_id: int, vaccine_id: str, completed_date: str):
     """Отмечает прививку как сделанную. Если уже отмечена — просто обновляет дату."""
     with get_connection() as conn:
