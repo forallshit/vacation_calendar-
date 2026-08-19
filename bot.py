@@ -51,12 +51,14 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def format_age(birth_date, today) -> str:
-    """Возвращает возраст ребёнка человеческим текстом: '3 месяца', '1 год 2 месяца' и т.д."""
-    days = (today - birth_date).days
+def format_duration(a, b) -> str:
+    """Человеческая разница между двумя датами (порядок не важен):
+    '5 дней', '3 месяца', '1 год 2 месяца' и т.д."""
+    start, end = (a, b) if a <= b else (b, a)
+    days = (end - start).days
 
-    months = (today.year - birth_date.year) * 12 + (today.month - birth_date.month)
-    if today.day < birth_date.day:
+    months = (end.year - start.year) * 12 + (end.month - start.month)
+    if end.day < start.day:
         months -= 1
     months = max(months, 0)
 
@@ -75,16 +77,34 @@ def format_age(birth_date, today) -> str:
     return f"{months} " + _plural(months, "месяц", "месяца", "месяцев")
 
 
+def format_age(birth_date, today) -> str:
+    """Возраст ребёнка человеческим текстом: '3 месяца', '1 год 2 месяца' и т.д."""
+    return format_duration(birth_date, today)
+
+
 def vaccine_status(v) -> tuple:
-    """Возвращает (иконка, текст статуса) для прививки с учётом days_left."""
-    if v["days_left"] < 0:
-        return "⚪️", f"была {abs(v['days_left'])} дн. назад"
-    elif v["days_left"] == 0:
+    """Возвращает (иконка, текст статуса) для прививки с учётом days_left.
+    Для больших сроков (>31 дня) переводит в месяцы/года — так же, как возраст."""
+    today = date.today()
+    due = v["due_date"]
+    days_left = v["days_left"]
+    date_str = due.strftime("%d.%m.%Y")
+
+    if days_left < 0:
+        overdue = abs(days_left)
+        if overdue <= 31:
+            duration = f"{overdue} " + _plural(overdue, "день", "дня", "дней")
+        else:
+            duration = format_duration(due, today)
+        return "⚪️", f"была {duration} назад ({date_str})"
+    elif days_left == 0:
         return "🔴", "СЕГОДНЯ"
-    elif v["days_left"] <= 7:
-        return "🟡", f"через {v['days_left']} дн. ({v['due_date'].strftime('%d.%m.%Y')})"
+    elif days_left <= 31:
+        icon = "🟡" if days_left <= 7 else "⚪️"
+        duration = f"{days_left} " + _plural(days_left, "день", "дня", "дней")
+        return icon, f"через {duration} ({date_str})"
     else:
-        return "⚪️", f"через {v['days_left']} дн. ({v['due_date'].strftime('%d.%m.%Y')})"
+        return "⚪️", f"через {format_duration(today, due)} ({date_str})"
 
 
 def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
@@ -175,6 +195,9 @@ class AddChild(StatesGroup):
 # ==== Команда /start ====
 @router.message(CommandStart())
 async def cmd_start(message: Message):
+    # при каждом /start список детей этого пользователя обнуляется с нуля
+    database.delete_all_children(message.from_user.id)
+
     caption = (
         "Этот бот поможет вам не пропустить обязательные прививки по "
         "национальному календарю РФ.\n\n"
