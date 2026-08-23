@@ -11,6 +11,8 @@
 """
 
 import asyncio
+import csv
+import io
 import logging
 import os
 from datetime import datetime, date
@@ -31,6 +33,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     FSInputFile,
+    BufferedInputFile,
 )
 
 import database
@@ -171,6 +174,18 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН")
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 CALENDAR_IMAGE_PATH = os.path.join(ASSETS_DIR, "vaccine_calendar.png")
 
+# Название партнёра (роддома/клиники), которое подставляется в приветствие.
+# Настраивается через переменную окружения ORG_NAME в Railway — код трогать не нужно.
+# Если переменная не задана, строка с названием партнёра просто не показывается.
+ORG_NAME = os.getenv("ORG_NAME", "")
+
+# Telegram ID сотрудников клиники, у которых есть доступ к админ-панели (/admin).
+# В Railway задаётся через переменную ADMIN_IDS — несколько ID через запятую,
+# например: 123456789,987654321. Свой ID можно узнать командой /whoami.
+ADMIN_IDS = {
+    int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
+}
+
 logging.basicConfig(level=logging.INFO)
 
 router = Router()
@@ -204,6 +219,8 @@ async def cmd_start(message: Message):
         "Добавьте ребёнка — и бот покажет, какие прививки пора ставить, а какие "
         "ещё предстоят, и сам напомнит заранее, когда придёт время."
     )
+    if ORG_NAME:
+        caption += f"\n\nСервис предоставлен: {ORG_NAME}"
     add_button = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="➕ Добавить ребёнка", callback_data="start_add_child")
     ]])
@@ -345,6 +362,8 @@ async def process_birth_date(message: Message, state: FSMContext):
         telegram_user_id=message.from_user.id,
         name=name,
         birth_date=birth_date.isoformat(),
+        parent_name=message.from_user.full_name,
+        parent_username=message.from_user.username,
     )
     child_id = None
     # находим только что добавленного ребёнка (совпадение по имени и дате рождения)
@@ -723,6 +742,91 @@ async def on_overdue_done(callback: CallbackQuery):
 @router.callback_query(F.data == "thanks_ack")
 async def on_thanks_ack(callback: CallbackQuery):
     await callback.answer("Пожалуйста! 🍀")
+
+
+# ==== Узнать свой Telegram ID (нужно, чтобы настроить ADMIN_IDS) ====
+@router.message(Command("whoami"))
+async def cmd_whoami(message: Message):
+    await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
+
+
+# ==== Админ-панель для персонала клиники: список всех пациентов ====
+@router.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Эта команда доступна только персоналу клиники.")
+        return
+
+    children = database.get_all_children_full()
+    if not children:
+        await message.answer("Пока нет ни одного добавленного ребёнка.")
+        return
+
+    lines = [f"📋 <b>Всего пациентов: {len(children)}</b>\n"]
+    for child_id, name, birth_date_str, parent_name, parent_username in children:
+        birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
+        completed = database.get_completed_vaccines_with_dates(child_id)
+
+        parent_line = parent_name or "—"
+        if parent_username:
+            parent_line += f" (@{parent_username})"
+
+        lines.append(f"👩 {parent_line}")
+        lines.append(f"👶 {name} — {birth_date.strftime('%d.%m.%Y')}")
+        if completed:
+            for vaccine_id, completed_date in completed:
+                vaccine_name = vaccines.get_vaccine_name_by_id(vaccine_id)
+                date_formatted = datetime.strptime(completed_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+                lines.append(f"   ✅ {vaccine_name} — {date_formatted}")
+        else:
+            lines.append("   — прививок пока не отмечено")
+        lines.append("")
+
+    # Разбиваем на несколько сообщений, чтобы не упереться в лимит Telegram (~4096 символов)
+    chunk, chunk_len = [], 0
+    for line in lines:
+        if chunk_len + len(line) + 1 > 3500:
+            await message.answer("\n".join(chunk))
+            chunk, chunk_len = [], 0
+        chunk.append(line)
+        chunk_len += len(line) + 1
+    if chunk:
+        await message.answer("\n".join(chunk))
+
+
+# ==== Выгрузка списка пациентов файлом CSV (открывается в Excel) ====
+@router.message(Command("admin_export"))
+async def cmd_admin_export(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Эта команда доступна только персоналу клиники.")
+        return
+
+    children = database.get_all_children_full()
+    if not children:
+        await message.answer("Пока нет ни одного добавленного ребёнка.")
+        return
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Родитель", "Telegram", "Ребёнок", "Дата рождения", "Прививка", "Дата прививки"])
+
+    for child_id, name, birth_date_str, parent_name, parent_username in children:
+        birth_date_fmt = datetime.strptime(birth_date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
+        username_fmt = f"@{parent_username}" if parent_username else ""
+        completed = database.get_completed_vaccines_with_dates(child_id)
+
+        if completed:
+            for vaccine_id, completed_date in completed:
+                vaccine_name = vaccines.get_vaccine_name_by_id(vaccine_id)
+                date_formatted = datetime.strptime(completed_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+                writer.writerow([parent_name or "", username_fmt, name, birth_date_fmt, vaccine_name, date_formatted])
+        else:
+            writer.writerow([parent_name or "", username_fmt, name, birth_date_fmt, "", ""])
+
+    # utf-8-sig — чтобы кириллица корректно открывалась в Excel (не только в Google Sheets)
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    file = BufferedInputFile(csv_bytes, filename="patients.csv")
+    await message.answer_document(file, caption=f"📊 Выгрузка пациентов: {len(children)} детей")
 
 
 async def main():
