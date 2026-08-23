@@ -85,6 +85,12 @@ def format_age(birth_date, today) -> str:
     return format_duration(birth_date, today)
 
 
+def format_child_name(name: str) -> str:
+    """Капитализирует имя ребёнка так, как его обычно пишут (Марк, Анна-Мария),
+    независимо от того, как ввёл родитель (марк, МАРК, анна-мария)."""
+    return name.strip().title()
+
+
 def vaccine_status(v) -> tuple:
     """Возвращает (иконка, текст статуса) для прививки с учётом days_left.
     Для больших сроков (>31 дня) переводит в месяцы/года — так же, как возраст."""
@@ -116,6 +122,7 @@ def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
     остальные оставались на месте. Когда просроченных не осталось — карточка становится
     поздравительной с информацией о следующей предстоящей прививке."""
     today = date.today()
+    name = format_child_name(name)
     schedule = vaccines.get_vaccines_for_child(birth_date, today)
     completed_ids = database.get_completed_vaccine_ids(child_id)
 
@@ -126,7 +133,7 @@ def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
         shown = overdue[:10]
         lines = [
             f"👶 <b>{name}</b>\nВозраст: {format_age(birth_date, today)}.\n",
-            f"По национальному календарю у {name} уже должны быть поставлены такие прививки:",
+            f"По национальному календарю ребёнку «{name}» уже должны быть поставлены такие прививки:",
         ]
         for v in shown:
             lines.append(f"• {v['name']}")
@@ -150,7 +157,7 @@ def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
         nxt = upcoming[0]
         icon, status = vaccine_status(nxt)
         text = (
-            f"🎉 Отлично! У {name} стоят все нужные прививки по возрасту.\n\n"
+            f"🎉 Отлично! У ребёнка «{name}» стоят все нужные прививки по возрасту.\n\n"
             f"Следующая: <b>{nxt['name']}</b> — {icon} {status}\n"
             f"Я напомню о ней заранее, за неделю."
         )
@@ -159,7 +166,7 @@ def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
             [InlineKeyboardButton(text="Спасибо! ❣️", callback_data="thanks_ack")],
         ])
     else:
-        text = f"🎉 Отлично! У {name} поставлены вообще все прививки по национальному календарю."
+        text = f"🎉 Отлично! У ребёнка «{name}» поставлены вообще все прививки по национальному календарю."
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Спасибо! ❣️", callback_data="thanks_ack")
         ]])
@@ -356,7 +363,7 @@ async def process_birth_date(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    name = data["name"]
+    name = format_child_name(data["name"])
 
     database.add_child(
         telegram_user_id=message.from_user.id,
@@ -405,7 +412,7 @@ async def process_birth_date(message: Message, state: FSMContext):
 # ==== Вспомогательное: клавиатура со списком детей ====
 def build_children_keyboard(children):
     buttons = [
-        [InlineKeyboardButton(text=f"👶 {name}", callback_data=f"childmenu:{child_id}")]
+        [InlineKeyboardButton(text=f"👶 {format_child_name(name)}", callback_data=f"childmenu:{child_id}")]
         for child_id, name, _ in children
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -455,6 +462,7 @@ async def on_child_menu(callback: CallbackQuery):
         return
 
     name, birth_date_str = match
+    name = format_child_name(name)
     birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
     today = date.today()
 
@@ -514,6 +522,7 @@ async def on_upcoming(callback: CallbackQuery):
         return
 
     name, birth_date_str = match
+    name = format_child_name(name)
     birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
     schedule = vaccines.get_vaccines_for_child(birth_date, date.today())
     completed_ids = database.get_completed_vaccine_ids(child_id)
@@ -526,7 +535,7 @@ async def on_upcoming(callback: CallbackQuery):
     if not not_done:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[back_button]])
         await callback.message.edit_text(
-            f"У {name} все прививки по графику уже поставлены. 🎉", reply_markup=keyboard
+            f"У ребёнка «{name}» все прививки по графику уже поставлены. 🎉", reply_markup=keyboard
         )
         await callback.answer()
         return
@@ -560,6 +569,7 @@ async def on_next6(callback: CallbackQuery):
         return
 
     name, birth_date_str = match
+    name = format_child_name(name)
     birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
     schedule = vaccines.get_vaccines_for_child(birth_date, date.today())
     completed_ids = database.get_completed_vaccine_ids(child_id)
@@ -572,7 +582,7 @@ async def on_next6(callback: CallbackQuery):
     if not upcoming6:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[back_button]])
         await callback.message.edit_text(
-            f"У {name} нет прививок по графику в ближайшие полгода.", reply_markup=keyboard
+            f"У ребёнка «{name}» нет прививок по графику в ближайшие полгода.", reply_markup=keyboard
         )
         await callback.answer()
         return
@@ -624,13 +634,14 @@ async def on_done_list(callback: CallbackQuery):
         await callback.answer("Не нашёл такого ребёнка", show_alert=True)
         return
 
+    name = format_child_name(name)
     back_button = InlineKeyboardButton(text="⬅️ Назад", callback_data=f"childmenu:{child_id}")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[back_button]])
 
     completed = database.get_completed_vaccines_with_dates(child_id)
     if not completed:
         await callback.message.edit_text(
-            f"У {name} пока нет поставленных прививок.", reply_markup=keyboard
+            f"У ребёнка «{name}» пока нет поставленных прививок.", reply_markup=keyboard
         )
         await callback.answer()
         return
@@ -663,7 +674,7 @@ async def cmd_done(message: Message):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="💉 Предстоящие прививки", callback_data=f"upcoming:{child_id}")
         ]])
-        await message.answer(f"👶 <b>{name}</b>", reply_markup=keyboard)
+        await message.answer(f"👶 <b>{format_child_name(name)}</b>", reply_markup=keyboard)
     else:
         await message.answer("Какого ребёнка?", reply_markup=build_children_keyboard(children))
 
@@ -689,6 +700,7 @@ async def on_mark_done(callback: CallbackQuery):
     child_name = ""
     if match:
         child_name, birth_date_str = match
+        child_name = format_child_name(child_name)
         birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
         schedule = vaccines.get_vaccines_for_child(birth_date, date.today())
         completed_ids = database.get_completed_vaccine_ids(child_id)
@@ -772,7 +784,7 @@ async def cmd_admin(message: Message):
             parent_line += f" (@{parent_username})"
 
         lines.append(f"👩 {parent_line}")
-        lines.append(f"👶 {name} — {birth_date.strftime('%d.%m.%Y')}")
+        lines.append(f"👶 {format_child_name(name)} — {birth_date.strftime('%d.%m.%Y')}")
         if completed:
             for vaccine_id, completed_date in completed:
                 vaccine_name = vaccines.get_vaccine_name_by_id(vaccine_id)
