@@ -23,7 +23,9 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
-                birth_date TEXT NOT NULL
+                birth_date TEXT NOT NULL,
+                parent_name TEXT,
+                parent_username TEXT
             )
         """)
         conn.execute("""
@@ -35,6 +37,14 @@ def init_db():
                 UNIQUE(child_id, vaccine_id)
             )
         """)
+        # Миграция для баз, созданных до появления parent_name/parent_username —
+        # SQLite не поддерживает "ADD COLUMN IF NOT EXISTS", поэтому просто
+        # пробуем добавить колонку и молча пропускаем ошибку, если она уже есть.
+        for column in ("parent_name", "parent_username"):
+            try:
+                conn.execute(f"ALTER TABLE children ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -47,12 +57,13 @@ def get_connection():
         conn.close()
 
 
-def add_child(telegram_user_id: int, name: str, birth_date: str):
+def add_child(telegram_user_id: int, name: str, birth_date: str, parent_name: str = None, parent_username: str = None):
     """birth_date в формате YYYY-MM-DD"""
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO children (telegram_user_id, name, birth_date) VALUES (?, ?, ?)",
-            (telegram_user_id, name, birth_date),
+            "INSERT INTO children (telegram_user_id, name, birth_date, parent_name, parent_username) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (telegram_user_id, name, birth_date, parent_name, parent_username),
         )
         conn.commit()
 
@@ -72,6 +83,17 @@ def get_all_children():
     with get_connection() as conn:
         cursor = conn.execute(
             "SELECT id, telegram_user_id, name, birth_date FROM children"
+        )
+        return cursor.fetchall()
+
+
+def get_all_children_full():
+    """Возвращает всех детей вместе с данными о родителе — для админ-панели клиники.
+    (id, name, birth_date, parent_name, parent_username), отсортировано по дате добавления."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT id, name, birth_date, parent_name, parent_username "
+            "FROM children ORDER BY id"
         )
         return cursor.fetchall()
 
