@@ -11,11 +11,14 @@
 """
 
 import asyncio
-import csv
 import io
 import logging
 import os
 from datetime import datetime, date
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ParseMode
@@ -806,7 +809,7 @@ async def cmd_admin(message: Message):
         await message.answer("\n".join(chunk))
 
 
-# ==== Выгрузка списка пациентов файлом CSV (открывается в Excel) ====
+# ==== Выгрузка списка пациентов файлом Excel ====
 @router.message(Command("admin_export"))
 async def cmd_admin_export(message: Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -818,26 +821,108 @@ async def cmd_admin_export(message: Message):
         await message.answer("Пока нет ни одного добавленного ребёнка.")
         return
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["Родитель", "Telegram", "Ребёнок", "Дата рождения", "Прививка", "Дата прививки"])
+    today = date.today()
+    HEADER_FILL = PatternFill(start_color="1466AF", end_color="1466AF", fill_type="solid")
+    HEADER_FONT = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+    BODY_FONT = Font(name="Arial", size=10)
 
+    wb = Workbook()
+
+    # ==== Лист 1: сводка — одна строка на ребёнка ====
+    ws = wb.active
+    ws.title = "Пациенты"
+    headers = [
+        "Родитель", "Telegram", "Ребёнок", "Дата рождения", "Возраст",
+        "Поставлено прививок", "Поставленные прививки",
+        "Ближайшая предстоящая", "Когда",
+    ]
+    ws.append(headers)
+    for col in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 28
+
+    # ==== Лист 2: подробно — по строке на каждую поставленную прививку ====
+    ws2 = wb.create_sheet("Прививки (детально)")
+    ws2.append(["Родитель", "Telegram", "Ребёнок", "Дата рождения", "Прививка", "Дата прививки"])
+    for col in range(1, 7):
+        cell = ws2.cell(row=1, column=col)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws2.row_dimensions[1].height = 22
+
+    detail_row = 2
     for child_id, name, birth_date_str, parent_name, parent_username in children:
-        birth_date_fmt = datetime.strptime(birth_date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
+        birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
+        display_name = format_child_name(name)
         username_fmt = f"@{parent_username}" if parent_username else ""
         completed = database.get_completed_vaccines_with_dates(child_id)
 
+        # ближайшая предстоящая (не поставленная) прививка
+        schedule = vaccines.get_vaccines_for_child(birth_date, today)
+        completed_ids = database.get_completed_vaccine_ids(child_id)
+        upcoming = [v for v in schedule if v["id"] not in completed_ids]
+        upcoming.sort(key=lambda v: v["days_left"])
+
         if completed:
+            completed_lines = []
             for vaccine_id, completed_date in completed:
                 vaccine_name = vaccines.get_vaccine_name_by_id(vaccine_id)
-                date_formatted = datetime.strptime(completed_date, "%Y-%m-%d").strftime("%d.%m.%Y")
-                writer.writerow([parent_name or "", username_fmt, name, birth_date_fmt, vaccine_name, date_formatted])
+                date_fmt = datetime.strptime(completed_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+                completed_lines.append(f"{vaccine_name} — {date_fmt}")
+                ws2.cell(row=detail_row, column=1, value=parent_name or "").font = BODY_FONT
+                ws2.cell(row=detail_row, column=2, value=username_fmt).font = BODY_FONT
+                ws2.cell(row=detail_row, column=3, value=display_name).font = BODY_FONT
+                ws2.cell(row=detail_row, column=4, value=birth_date.strftime("%d.%m.%Y")).font = BODY_FONT
+                ws2.cell(row=detail_row, column=5, value=vaccine_name).font = BODY_FONT
+                ws2.cell(row=detail_row, column=6, value=date_fmt).font = BODY_FONT
+                detail_row += 1
+            completed_summary = "\n".join(completed_lines)
         else:
-            writer.writerow([parent_name or "", username_fmt, name, birth_date_fmt, "", ""])
+            completed_summary = "—"
+            ws2.cell(row=detail_row, column=1, value=parent_name or "").font = BODY_FONT
+            ws2.cell(row=detail_row, column=2, value=username_fmt).font = BODY_FONT
+            ws2.cell(row=detail_row, column=3, value=display_name).font = BODY_FONT
+            ws2.cell(row=detail_row, column=4, value=birth_date.strftime("%d.%m.%Y")).font = BODY_FONT
+            detail_row += 1
 
-    # utf-8-sig — чтобы кириллица корректно открывалась в Excel (не только в Google Sheets)
-    csv_bytes = output.getvalue().encode("utf-8-sig")
-    file = BufferedInputFile(csv_bytes, filename="patients.csv")
+        if upcoming:
+            nxt = upcoming[0]
+            _, status = vaccine_status(nxt)
+            next_name, next_when = nxt["name"], status
+        else:
+            next_name, next_when = "—", "все прививки поставлены 🎉"
+
+        row = [
+            parent_name or "", username_fmt, display_name, birth_date.strftime("%d.%m.%Y"),
+            format_age(birth_date, today), len(completed), completed_summary, next_name, next_when,
+        ]
+        ws.append(row)
+        r = ws.max_row
+        for col in range(1, len(headers) + 1):
+            cell = ws.cell(row=r, column=col)
+            cell.font = BODY_FONT
+            cell.alignment = Alignment(vertical="top", wrap_text=(col == 7))
+        ws.row_dimensions[r].height = max(15, 14 * max(len(completed), 1))
+
+    widths = {1: 20, 2: 16, 3: 16, 4: 14, 5: 14, 6: 12, 7: 38, 8: 30, 9: 26}
+    for col, w in widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+    ws.freeze_panes = "A2"
+
+    widths2 = {1: 20, 2: 16, 3: 16, 4: 14, 5: 38, 6: 14}
+    for col, w in widths2.items():
+        ws2.column_dimensions[get_column_letter(col)].width = w
+    ws2.freeze_panes = "A2"
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    file = BufferedInputFile(buffer.read(), filename="patients.xlsx")
     await message.answer_document(file, caption=f"📊 Выгрузка пациентов: {len(children)} детей")
 
 
