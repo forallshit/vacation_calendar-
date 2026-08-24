@@ -506,11 +506,57 @@ async def on_child_menu(callback: CallbackQuery):
     ]
     if len(upcoming) > len(next3):
         buttons.append([InlineKeyboardButton(text="📋 Все предстоящие", callback_data=f"upcoming:{child_id}")])
+    buttons.append([InlineKeyboardButton(text="🗑 Удалить ребёнка", callback_data=f"deleteconfirm:{child_id}")])
     buttons.append([InlineKeyboardButton(text="⬅️ К списку детей", callback_data="backchildren")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
+
+
+# ==== Подтверждение удаления ребёнка ====
+@router.callback_query(F.data.startswith("deleteconfirm:"))
+async def on_delete_confirm(callback: CallbackQuery):
+    child_id = int(callback.data.split(":")[1])
+    children = database.get_children(callback.from_user.id)
+    name = next((n for cid, n, _ in children if cid == child_id), None)
+
+    if name is None:
+        await callback.answer("Не нашёл такого ребёнка", show_alert=True)
+        return
+
+    name = format_child_name(name)
+    text = (
+        f"⚠️ Удалить {name} из списка?\n\n"
+        f"Вместе с профилем удалится вся история поставленных прививок. "
+        f"Это действие нельзя отменить."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"deletechild:{child_id}")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"childmenu:{child_id}")],
+    ])
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+# ==== Само удаление ребёнка ====
+@router.callback_query(F.data.startswith("deletechild:"))
+async def on_delete_child(callback: CallbackQuery):
+    child_id = int(callback.data.split(":")[1])
+    database.delete_child(child_id, callback.from_user.id)
+
+    children = database.get_children(callback.from_user.id)
+    if not children:
+        await callback.message.edit_text(
+            "Готово, ребёнок удалён.\n\nУ вас пока нет добавленных детей. "
+            "Добавьте через «➕ Добавить ребёнка»"
+        )
+        await callback.answer("Удалено")
+        return
+
+    keyboard = build_children_keyboard(children)
+    await callback.message.edit_text("Готово, ребёнок удалён.\n\nВыберите ребёнка:", reply_markup=keyboard)
+    await callback.answer("Удалено")
 
 
 # ==== Предстоящие прививки конкретного ребёнка (список кнопками) ====
@@ -617,7 +663,23 @@ async def on_vaccine_detail(callback: CallbackQuery):
         await callback.answer("Не нашёл информацию об этой прививке", show_alert=True)
         return
 
-    text = f"💉 <b>{vaccine['name']}</b>\n\n{vaccine['info']}"
+    # добавляем срок постановки, рассчитанный по дате рождения конкретного ребёнка
+    due_line = ""
+    children = database.get_children(callback.from_user.id)
+    match = next(((n, b) for cid, n, b in children if cid == child_id), None)
+    if match:
+        _, birth_date_str = match
+        birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d").date()
+        schedule = vaccines.get_vaccines_for_child(birth_date, date.today())
+        v_sched = next((v for v in schedule if v["id"] == vaccine_id), None)
+        if v_sched:
+            due_date_str = v_sched["due_date"].strftime("%d.%m.%Y")
+            if v_sched["days_left"] < 0:
+                due_line = f"\n\n❗ Плановый срок был {due_date_str} — уже пора поставить"
+            else:
+                due_line = f"\n\n📅 Вам нужно сделать её до {due_date_str}"
+
+    text = f"💉 <b>{vaccine['name']}</b>\n\n{vaccine['info']}{due_line}"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Поставили", callback_data=f"markdone:{child_id}:{vaccine_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"upcoming:{child_id}")],
@@ -932,3 +994,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
