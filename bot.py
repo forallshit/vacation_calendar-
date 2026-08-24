@@ -506,7 +506,7 @@ async def on_child_menu(callback: CallbackQuery):
     ]
     if len(upcoming) > len(next3):
         buttons.append([InlineKeyboardButton(text="📋 Все предстоящие", callback_data=f"upcoming:{child_id}")])
-    buttons.append([InlineKeyboardButton(text="🗑 Удалить ребёнка", callback_data=f"deleteconfirm:{child_id}")])
+    buttons.append([InlineKeyboardButton(text="❌ Удалить профиль", callback_data=f"deleteconfirm:{child_id}")])
     buttons.append([InlineKeyboardButton(text="⬅️ К списку детей", callback_data="backchildren")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -527,12 +527,12 @@ async def on_delete_confirm(callback: CallbackQuery):
 
     name = format_child_name(name)
     text = (
-        f"⚠️ Удалить {name} из списка?\n\n"
+        f"⚠️ Удалить профиль {name}?\n\n"
         f"Вместе с профилем удалится вся история поставленных прививок. "
         f"Это действие нельзя отменить."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"deletechild:{child_id}")],
+        [InlineKeyboardButton(text="❌ Да, удалить", callback_data=f"deletechild:{child_id}")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"childmenu:{child_id}")],
     ])
     await callback.message.edit_text(text, reply_markup=keyboard)
