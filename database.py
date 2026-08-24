@@ -99,7 +99,14 @@ def get_all_children_full():
 
 
 def delete_child(child_id: int, telegram_user_id: int):
+    """Удаляет ребёнка вместе с его отметками о прививках. telegram_user_id — защита,
+    чтобы пользователь мог удалить только своего ребёнка, а не чужого по id."""
     with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM completed_vaccines WHERE child_id = ? AND child_id IN "
+            "(SELECT id FROM children WHERE id = ? AND telegram_user_id = ?)",
+            (child_id, child_id, telegram_user_id),
+        )
         conn.execute(
             "DELETE FROM children WHERE id = ? AND telegram_user_id = ?",
             (child_id, telegram_user_id),
