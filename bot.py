@@ -159,10 +159,20 @@ def build_overdue_card(child_id: int, name: str, birth_date) -> tuple:
     if upcoming:
         nxt = upcoming[0]
         icon, status = vaccine_status(nxt)
+
+        if nxt["days_left"] == 0:
+            reminder_line = "Она нужна сегодня! Не забудьте посетить врача."
+        elif nxt["days_left"] <= 3:
+            reminder_line = f"Не забудьте посетить врача — через {nxt['days_left']} дн."
+        elif nxt["days_left"] <= 14:
+            reminder_line = "Я напомню о ней за 3 дня до срока."
+        else:
+            reminder_line = "Я напомню о ней заранее — за 2 недели и за 3 дня до срока."
+
         text = (
             f"🎉 Отлично! У ребёнка «{name}» стоят все нужные прививки по возрасту.\n\n"
             f"Следующая: <b>{nxt['name']}</b> — {icon} {status}\n"
-            f"Я напомню о ней заранее, за неделю."
+            f"{reminder_line}"
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="ℹ️ Подробнее об этой прививке", callback_data=f"vaccinedetail:{nxt['id']}:{child_id}")],
